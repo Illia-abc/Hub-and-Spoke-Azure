@@ -1,0 +1,20 @@
+# Secrets and local parameters
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+*.pfx
+.env
+*.local.bicepparam
+*.local.json
+
+# Compiled ARM templates (generated from Bicep)
+infrastructure/**/*.json
+!infrastructure/bicepconfig.json
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
