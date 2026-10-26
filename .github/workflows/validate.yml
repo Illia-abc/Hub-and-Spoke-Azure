@@ -1,0 +1,73 @@
+name: validate
+
+# Runs on every pull request. Never changes Azure.
+# NOTE: no "paths" filter on purpose. If this check is "required" in the branch
+# ruleset, a skipped workflow would block docs-only PRs forever.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read            # default for every job: read-only
+
+concurrency:
+  group: validate-${{ github.ref }}
+  cancel-in-progress: true  # a newer push to the same PR cancels the older run
+
+env:
+  RG: rg-hubspoke-lab
+  AZURE_CORE_NO_COLOR: 'true'
+
+jobs:
+  build:
+    name: Build + lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile Bicep (linter rules come from bicepconfig.json)
+        env:
+          SSH_PUBLIC_KEY: ssh-ed25519 AAAAplaceholder   # real key is not needed to compile
+        run: |
+          az bicep install
+          az bicep build --file infrastructure/main.bicep --stdout > /dev/null
+          az bicep build-params --file infrastructure/main.bicepparam --stdout > /dev/null
+
+  what-if:
+    name: Azure validate + what-if
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      id-token: write       # only this job may request an OIDC token
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to Azure (OIDC, no stored password)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Preflight validation (Azure checks the template, creates nothing)
+        env:
+          SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
+        run: |
+          az deployment group validate -g "$RG" \
+            -f infrastructure/main.bicep -p infrastructure/main.bicepparam
+
+      - name: What-if (preview of changes)
+        env:
+          SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
+        run: |
+          az deployment group what-if -g "$RG" \
+            -f infrastructure/main.bicep -p infrastructure/main.bicepparam | tee whatif.txt
+          {
+            echo '### What-if result'
+            echo '```'
+            cat whatif.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
