@@ -325,7 +325,7 @@ Add the tags, click **Review + create**, then **Create**.
 
 **Result:** an isolated network for the development environment.
 
-![Dev virtual network](docs/screenshots/portal/03-vnet-dev.png)
+![Dev virtual network](docs/screenshots/03-vnet-dev.png)
 
 ### Step 4 — Create the prod virtual network
 
@@ -877,10 +877,9 @@ Click **Create**.
  
 Open **Resource group → Overview** and check that all resources are in place.
  
-![Deployed Azure resources](docs/screenshots/22-resources.png)
+![Deployed Azure resources](docs/screenshots/30-resources.png)
  
 ## Verification
-
 
 The tests below prove that the hub-and-spoke design works: traffic between the spokes is controlled by the Firewall, allowed traffic passes, and everything else is blocked. Run them in one session while the Firewall and Bastion exist, then delete the expensive resources (see [Clean up](#clean-up)).
 
@@ -1025,4 +1024,97 @@ Azure Firewall and Azure Bastion are billed per hour for as long as they exist, 
 
 Open **Resource groups → `rg-hubspoke-lab` → Delete resource group** and type the group name to confirm. All resources inside are removed, including the public IP addresses and the policy assignments scoped to this resource group.
 
+## Deployment using Bicep (Infrastructure as Code)
 
+The same environment that was built by hand in the Portal is described as code in `infrastructure/`. Every resource, setting and rule from the Portal guide has a counterpart in a Bicep module, so the whole lab can be rebuilt (or reviewed in a pull request) from the repository alone.
+
+### What was created and why
+
+| File | What it describes | Why it is a separate file |
+| ---- | ----------------- | ------------------------- |
+| `infrastructure/main.bicep` | Parameters, phase switches, tags, and the order in which modules are called | One entry point that wires everything together |
+| `infrastructure/main.bicepparam` | Parameter values and the phase switches (`deployCompute`, `deployFirewall`, `deployBastion`, `deployPolicy`) | The desired state lives in git, so a change is reviewed in a pull request |
+| `modules/monitoring.bicep` | Log Analytics workspace `law-hubspoke` | Firewall logs need a destination before the Firewall exists |
+| `modules/routing.bicep` | Route tables `rt-dev`, `rt-prod` with `0.0.0.0/0` → Firewall private IP | Must exist **before** the network, because spoke subnets reference them |
+| `modules/network.bicep` | 3 VNets, subnets, 4 peerings (no dev↔prod), NSGs, `asg-web` | The network foundation (Phase 1) |
+| `modules/compute.bicep` | `vm-dev-01`, `vm-prod-01` (Ubuntu 24.04, SSH key only, no public IP) | Test workloads for the connectivity tests |
+| `modules/firewall.bicep` | Azure Firewall (Basic), firewall policy, rules, diagnostic settings | The paid central control point (Phase 2) |
+| `modules/bastion.bicep` | Azure Bastion (Basic) | Browser-based SSH without public IPs (Phase 2) |
+| `modules/policy.bicep` | Three Azure Policy assignments (deny NIC public IPs, require `env` tag, allowed locations) | Governance (Phase 3), deployed last |
+
+### One-time bootstrap (outside Bicep)
+ 
+The resource group and the identity used by CI/CD are created once by a script, not by Bicep:
+ 
+```powershell
+az login
+./scripts/bootstrap.ps1 -Owner <github-user> -Repo <repo-name>
+```
+
+Reasons:
+
+1. **Chicken and egg.** `main.bicep` deploys *into* an existing resource group (`targetScope = 'resourceGroup'`), so the group must exist first.
+2. **Least privilege.** The CI/CD identity gets `Contributor` and `Resource Policy Contributor` on this one resource group only. Creating a group needs rights on the whole subscription, so the pipeline deliberately cannot do it.
+3. **Different lifecycles.** The group is a long-lived container; its content changes with every pull request.
+4. **OIDC instead of passwords.** The script also creates three federated credentials (environment `lab`, branch `main`, pull requests), so GitHub Actions can log in to Azure without any stored secret.
+
+Everything *inside* the group is Bicep. Scripts are used only for what Bicep cannot or should not do.
+
+### Deploy in phases
+
+Phases are controlled by switches in `main.bicepparam`, so the expensive Azure Firewall and Bastion are created only when needed.
+
+| Phase | Switches | Creates | Cost |
+| ----- | -------- | ------- | ---- |
+| 1 | `deployCompute = true` | Network, NSG/ASG, peerings, route tables (empty), Log Analytics, VMs | Low |
+| 2 | `deployFirewall = true`, `deployBastion = true` | Firewall + policy + rules + diagnostics, default route to the Firewall, Bastion | **Billed per hour** |
+| 3 | `deployPolicy = true` | Azure Policy assignments | None |
+
+```powershell
+az login
+$env:SSH_PUBLIC_KEY = (Get-Content ~/.ssh/id_ed25519.pub)
+
+# 1. Preview: what would change (creates nothing)
+az deployment group what-if -g rg-hubspoke-lab `
+  -f infrastructure/main.bicep -p infrastructure/main.bicepparam
+
+# 2. Deploy
+az deployment group create -g rg-hubspoke-lab `
+  -f infrastructure/main.bicep -p infrastructure/main.bicepparam
+```
+
+To move to the next phase, change the switch in `main.bicepparam`, run `what-if`, then deploy again.
+
+### Design decisions in the code
+
+| Decision | Rationale |
+| -------- | --------- |
+| Modules per function, wired in `main.bicep` | Each file has one responsibility and can be reviewed on its own |
+| Route tables are created before the network | Subnets reference them; creating them after the Firewall would be a circular dependency |
+| Firewall private IP is a parameter (`10.0.0.4`) | It is the first usable address of `AzureFirewallSubnet` (Azure reserves the first four). `main.bicep` outputs both the expected and the actual IP so a mismatch is visible |
+| Default route is added only when `deployFirewall = true` | Otherwise traffic would be sent to a Firewall that does not exist |
+| Conditional modules (`if (deployX)`) | Paid resources never appear by accident |
+| Policy is deployed last | A policy with `Deny` effect must not block the deployment itself |
+| Subnets use `defaultOutboundAccess = false` | VMs reach the internet only through the Firewall |
+| Same tags everywhere, `deployment = bicep` | Resources from the Portal and Bicep phases can be told apart in Cost Management |
+
+### Things to know about Bicep
+
+- **Incremental mode never deletes.** Setting `deployFirewall = false` after the Firewall exists does not remove it. Delete the paid resources explicitly (below).
+- **The code is the source of truth.** A manual change in the Portal can be overwritten by the next deployment.
+
+### Clean up the paid resources
+
+```powershell
+az network firewall delete -g rg-hubspoke-lab -n afw-hub
+az network bastion delete  -g rg-hubspoke-lab -n bas-hub
+az network public-ip delete -g rg-hubspoke-lab -n pip-afw-hub
+az network public-ip delete -g rg-hubspoke-lab -n pip-afw-mgmt
+az network public-ip delete -g rg-hubspoke-lab -n pip-bas-hub
+```
+
+Then set `deployFirewall` and `deployBastion` back to `false` in `main.bicepparam`, otherwise the next deployment creates them again. The firewall policy `afwp-hub` is kept: it is free and holds the rules.
+
+### CI
+
+`.github/workflows/validate.yml` compiles the Bicep code on every pull request and on every push to `main`. A broken template is caught before it is merged.
