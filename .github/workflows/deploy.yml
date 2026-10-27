@@ -1,0 +1,93 @@
+name: deploy
+
+# Deploys infrastructure/main.bicep to Azure.
+# Runs after a pull request is merged into main (only if infrastructure files changed), or by hand.
+# WHAT gets deployed is decided by the switches in infrastructure/main.bicepparam
+# (deployCompute / deployFirewall / deployBastion / deployPolicy).
+#
+# Two jobs, two different OIDC identities (created by scripts/bootstrap.ps1):
+#   plan  -> token subject  ...:ref:refs/heads/main   (credential gh-branch-main)
+#   apply -> token subject  ...:environment:lab       (credential gh-environment-lab)
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'infrastructure/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false   # never cancel a deployment that is already running
+
+env:
+  RG: rg-hubspoke-lab
+  AZURE_CORE_NO_COLOR: 'true'
+
+jobs:
+  plan:
+    name: What-if (main)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to Azure (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: What-if (what will change)
+        env:
+          SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
+        run: |
+          az deployment group what-if -g "$RG" \
+            -f infrastructure/main.bicep -p infrastructure/main.bicepparam | tee whatif.txt
+          {
+            echo '### What-if result (main)'
+            echo '```'
+            cat whatif.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  apply:
+    name: Deploy
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 60          # Firewall and Bastion take several minutes each
+    environment: lab             # add "Required reviewers" to this environment to approve every deployment
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to Azure (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy
+        env:
+          SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
+        run: |
+          az deployment group create -g "$RG" \
+            -n "deploy-${{ github.run_number }}" \
+            -f infrastructure/main.bicep -p infrastructure/main.bicepparam
+
+      - name: Show failed operations (only if the deployment failed)
+        if: failure()
+        run: |
+          az deployment operation group list -g "$RG" -n "deploy-${{ github.run_number }}" \
+            --query "[?properties.provisioningState=='Failed'].{resource:properties.targetResource.resourceName, error:properties.statusMessage.error.message}" \
+            -o json

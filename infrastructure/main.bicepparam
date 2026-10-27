@@ -12,9 +12,9 @@ param tags = {
 // Desired state lives in git: change a switch in a PR, review the what-if, merge to deploy.
 // Phase 1: compute only -> Phase 2: firewall/bastion (paid) -> Phase 3: policy
 param deployCompute = true
-param deployFirewall = false
-param deployBastion = false
-param deployPolicy = false
+param deployFirewall = true
+param deployBastion = true
+param deployPolicy = true
 
 param adminUsername = 'azureuser'
 // PowerShell: $env:SSH_PUBLIC_KEY = (Get-Content ~/.ssh/id_ed25519.pub)   (set it BEFORE running az deployment)
