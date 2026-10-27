@@ -1070,51 +1070,109 @@ Phases are controlled by switches in `main.bicepparam`, so the expensive Azure F
 | 2 | `deployFirewall = true`, `deployBastion = true` | Firewall + policy + rules + diagnostics, default route to the Firewall, Bastion | **Billed per hour** |
 | 3 | `deployPolicy = true` | Azure Policy assignments | None |
 
+
+### Step 1. Run the bootstrap script
+ 
+Creates the resource group and the app registration that GitHub Actions uses to log in to Azure (OIDC, no stored password). It runs once, outside Bicep.
+ 
 ```powershell
 az login
-$env:SSH_PUBLIC_KEY = (Get-Content ~/.ssh/id_ed25519.pub)
-
-# 1. Preview: what would change (creates nothing)
-az deployment group what-if -g rg-hubspoke-lab `
-  -f infrastructure/main.bicep -p infrastructure/main.bicepparam
-
-# 2. Deploy
-az deployment group create -g rg-hubspoke-lab `
-  -f infrastructure/main.bicep -p infrastructure/main.bicepparam
+.\scripts\bootstrap.ps1 -Owner Illia-abc -Repo Hub-and-Spoke-Azure
 ```
 
-To move to the next phase, change the switch in `main.bicepparam`, run `what-if`, then deploy again.
+![bootstrap output](docs/screenshots/31-bootstrap-output.png)
+ 
+---
+ 
+### Step 3. Check the federated credentials in Entra ID
+ 
+Portal, Entra ID, App registrations, your app, Certificates & secrets, Federated credentials. Three credentials are needed:
+ 
+| Entity type | Based on selection | Name |
+| ----------- | ------------------ | ---- |
+| Pull request | n/a | `gh-pull-request` |
+| Environment | `lab` | `gh-environment-lab` |
+| Branch | `main` | `gh-branch-main` |
+ 
+When creating a credential, **Organization ID** and **Repository ID** must be filled in. Both are numbers and are printed in the `subject claim` line of a failed login log (see Error 2).
+ 
+![credential form](docs/screenshots/32-federated-credential-form.png)
 
-### Design decisions in the code
+*Screenshot: Add credential form with Organization ID and Repository ID filled in and the generated Subject identifier.*
 
-| Decision | Rationale |
-| -------- | --------- |
-| Modules per function, wired in `main.bicep` | Each file has one responsibility and can be reviewed on its own |
-| Route tables are created before the network | Subnets reference them; creating them after the Firewall would be a circular dependency |
-| Firewall private IP is a parameter (`10.0.0.4`) | It is the first usable address of `AzureFirewallSubnet` (Azure reserves the first four). `main.bicep` outputs both the expected and the actual IP so a mismatch is visible |
-| Default route is added only when `deployFirewall = true` | Otherwise traffic would be sent to a Firewall that does not exist |
-| Conditional modules (`if (deployX)`) | Paid resources never appear by accident |
-| Policy is deployed last | A policy with `Deny` effect must not block the deployment itself |
-| Subnets use `defaultOutboundAccess = false` | VMs reach the internet only through the Firewall |
-| Same tags everywhere, `deployment = bicep` | Resources from the Portal and Bicep phases can be told apart in Cost Management |
+![credentials list](docs/screenshots/33-federated-credentials-list.png)
 
-### Things to know about Bicep
+*Screenshot: Federated credentials tab with the three credentials.*
+ 
+#### Error 2. What happens if the IDs are left empty: `AADSTS700213`
+ 
+GitHub puts the numeric IDs of the owner and the repository into the token subject:
+ 
+```
+repo:Illia-abc@<owner-id>/Hub-and-Spoke-Azure@<repo-id>:pull_request
+```
+ 
+If the credential was created without the IDs, its subject is `repo:Illia-abc/Hub-and-Spoke-Azure:pull_request`. The comparison is exact, so the login is rejected:
+ 
+```
+AADSTS700213: No matching federated identity record found for presented
+assertion subject 'repo:Illia-abc@<owner-id>/Hub-and-Spoke-Azure@<repo-id>:pull_request'.
+```
+ 
+**Fix:** delete the old credentials and create them again with Organization ID and Repository ID. Then re-run the failed job (Checks, Re-run failed jobs). No new commit is needed.
+ 
+![aadsts700213](docs/screenshots/34-aadsts700213-error.png)
+ 
+> `scripts/bootstrap.ps1` must create the credentials in this ID form as well, otherwise every new run of the script ends with the same error. <!-- TODO: confirm the script is updated, then delete this note -->
+ 
+---
+ 
+### Step 4. Add the GitHub secrets and the environment
+ 
+Repository, Settings, Secrets and variables, Actions, New repository secret:
+ 
+| Secret | Value |
+| ------ | ----- |
+| `AZURE_CLIENT_ID` | Application (client) ID of the app from bootstrap |
+| `AZURE_TENANT_ID` | Entra tenant ID |
+| `AZURE_SUBSCRIPTION_ID` | Target subscription ID |
+| `SSH_PUBLIC_KEY` | Contents of `~/.ssh/id_ed25519.pub` (one line) |
+ 
+Then Settings, Environments, New environment, name `lab`.
+ 
+![github secrets](docs/screenshots/35-github-secrets.png)
 
-- **Incremental mode never deletes.** Setting `deployFirewall = false` after the Firewall exists does not remove it. Delete the paid resources explicitly (below).
-- **The code is the source of truth.** A manual change in the Portal can be overwritten by the next deployment.
+*Screenshot: Actions secrets page with the four secret names (values are never shown).*
+ 
+#### Error 1. What happens if the secrets are missing: `client-id` and `tenant-id` not supplied
+ 
+The job `Build + lint` passes, but `Azure validate + what-if` fails on the first Azure step in about 10 seconds. The steps after it are skipped.
+ 
+```
+Login failed with Error: Using auth-type: SERVICE_PRINCIPAL.
+Not all values are present. Ensure 'client-id' and 'tenant-id' are supplied.
+```
+ 
+**Cause:** the workflow reads `client-id` and `tenant-id` from repository secrets, and they did not exist yet.
+ 
+**Fix:** add the secrets from the table and re-run the failed job.
+ 
+![login-failed](docs/screenshots/36-login-failed-no-secrets.png)
 
-### Clean up the paid resources
-
+*Screenshot: job `Azure validate + what-if`, step `Login to Azure` failed with "Not all values are present".*
+ 
+---
+ 
+### Step 5. Create a branch and push
+ 
+The branch is created by the first command that has `-c`. Nothing is committed to `main` directly.
+ 
 ```powershell
-az network firewall delete -g rg-hubspoke-lab -n afw-hub
-az network bastion delete  -g rg-hubspoke-lab -n bas-hub
-az network public-ip delete -g rg-hubspoke-lab -n pip-afw-hub
-az network public-ip delete -g rg-hubspoke-lab -n pip-afw-mgmt
-az network public-ip delete -g rg-hubspoke-lab -n pip-bas-hub
+git switch main
+git pull
+git switch -c <create new branch>
+git add README.md docs/screenshots/
+git commit -m "docs: add Bicep walkthrough and screenshots"
+git push -u origin docs/readme-bicep
 ```
-
-Then set `deployFirewall` and `deployBastion` back to `false` in `main.bicepparam`, otherwise the next deployment creates them again. The firewall policy `afwp-hub` is kept: it is free and holds the rules.
-
-### CI
-
-`.github/workflows/validate.yml` compiles the Bicep code on every pull request and on every push to `main`. A broken template is caught before it is merged.
+ 
