@@ -331,7 +331,6 @@ Add the tags, click **Review + create**, then **Create**.
 
 Repeat Step 3 with these values:
 
-
 | Setting                                       | Value             |
 | --------------------------------------------- | ----------------- |
 | `Virtual network name`                        | `vnet-prod`       |
@@ -348,7 +347,6 @@ Repeat Step 3 with these values:
 ---
 
 ### Step 5 — Create the VNet peering
-
  
 Peering connects the hub with each spoke. There is **no** peering between `vnet-dev` and `vnet-prod`. Peering is not transitive, so the environments can reach each other only through the hub.
  
@@ -431,7 +429,7 @@ In the search bar, enter:
 ```text
 Network security groups
 ```
- 
+
 Click **Network security groups → Create**:
  
 | Setting                 | Value                  |
@@ -545,11 +543,11 @@ Create the prod VMs in the same way:
 #### Add the prod VM to the ASG
  
 Open `vm-prod-01` → **Networking → Network interface → Application security groups**, select `asg-web` and save.
- 
+
 **What this does:** labels the VM's network interface as a web server. The `allow-dev-web` rule in `nsg-prod` uses `asg-web` as its destination, so this single step is what makes the rule apply to the VM. Without it the group is empty and dev cannot reach prod, even though everything else is configured. Any future web server only needs the same label, and the rule does not have to change.
 
 **Result:** two VMs without public IPs. The prod VM is labeled as web servers, so the `allow-dev-web` rule applies to them.
- 
+
 ![Prod virtual machines](docs/screenshots/11-vm-prod.png)
 
 #### Check phase 1
@@ -594,11 +592,11 @@ Add the tags, click **Review + create**, then **Create**.
 ### Step 9 — Create Azure Firewall
  
 In the search bar, enter:
- 
+
 ```text
 Firewalls
 ```
- 
+
 Click **Firewalls → Create**. On the **Basics** tab:
  
 | Setting                                     | Value                                           |
@@ -618,9 +616,15 @@ Click **Firewalls → Create**. On the **Basics** tab:
 **What this does:** deploys a managed firewall into the hub. It gets a private address from `AzureFirewallSubnet` and a public IP for outbound internet traffic. With the Basic SKU, Azure also uses a separate management subnet and management public IP, so the platform can manage the firewall independently from customer traffic. The rules do not live on the firewall itself but in the firewall policy `afwp-hub`, which can be reused or changed separately.
 
 Add the tags, click **Review + create**, then **Create**. The deployment takes several minutes.
- 
+
+A **Firewall policy** is a collection of rules—covering network, application, and DNAT—along with configurations such as Threat Intelligence and DNS settings. The firewall itself makes no decisions; it merely executes the instructions defined in the policy. The policy is structured as a standalone resource, allowing it to be attached to multiple firewalls while supporting inheritance—for example, applying a company-wide baseline set of rules with additional regional rules layered on top. The legacy approach, where rules were embedded directly within the firewall ("classic rules"), is now obsolete. Without a policy, no rules exist; consequently, a "default deny" stance applies, preventing traffic (such as from a dev environment to production). The policy tier must match the firewall SKU (e.g., a "Basic" policy requires a "Basic" firewall). If a firewall is deleted, the policy remains intact, ensuring that rules do not need to be recreated.
+
+A **Public IP** is required because our VMs are private, and 10.x addresses are not routable on the Internet. When a VM performs an `apt update`, the Firewall applies SNAT: it replaces the source address (10.1.0.4) with its own public address. The response returns to this public address, and the Firewall then forwards it back to the VM. Without this address, our `ubuntu-updates` rule would not function. The requirements are: Standard SKU and a Static assignment (since a dynamic address would change upon a restart). The address zone must match the Firewall zone—which is the reason for the error: "Public IP zones must match the firewall zones." This does not constitute a security vulnerability; as long as there is no DNAT rule in place, inbound traffic to this address is blocked.
+
+The **management public IP** is required only for the Basic SKU. Microsoft uses it to manage the firewall itself, handling updates and monitoring its health. It is attached to the firewall's second (management) IP configuration, not to a VM or a spoke subnet. The firewall runs inside our VNet with two network interfaces: the data NIC in `AzureFirewallSubnet` (`10.0.0.4`, with the main public IP) and the management NIC in `AzureFirewallManagementSubnet` (minimum size /26, with the management public IP). Every NIC needs a private address from some subnet, which is why the management NIC needs its own subnet. The subnet is separate so that the management channel has its own route table. If the data subnet were given a `0.0.0.0/0` route towards on-premises (forced tunneling), management traffic to Azure would follow it and break. In the dedicated subnet, which must have no route table attached, management traffic goes straight to the internet. Our UDR (`0.0.0.0/0` → `10.0.0.4`) is attached to the spoke subnets only and has nothing to do with this. None of this applies in our lab: there is no VPN or ExpressRoute, and no forced tunneling, so a route table is not required for the `AzureFirewallManagementSubnet`. We do have separate subnets, as this is a requirement of the Basic tier. Firewall rules do not apply to this IP, user traffic does not pass through it, and it cannot be configured. In the Standard SKU it is optional (required only for forced tunneling), whereas in the Basic SKU it is always mandatory. 
+
 When it is done, open the Firewall → **Overview** and write down the **Private IP address**. It is needed for the route tables.
- 
+  
 | Value                  | Result       |
 | ---------------------- | ------------ |
 | Firewall private IP    | `10.0.0.4`   |
@@ -644,7 +648,7 @@ Open **Network rules → Add a rule collection**:
 | Setting                 | Value                               |
 | ----------------------- | ----------------------------------- |
 | `Name`                  | `net-rules`                         |
-| `Rule collection type`  | `Network`                               |
+| `Rule collection type`  | `Network`                           |
 | `Priority`              | `100`                               |
 | `Rule collection action`| `Allow`                             |
 | `Rule collection group` | `DefaultNetworkRuleCollectionGroup` |
@@ -696,7 +700,7 @@ Everything that matches no rule is **denied by default**, so no extra deny rule 
 ### Step 11 — Create the route tables
  
 In the search bar, enter:
- 
+
 ```text
 Route tables
 ```
@@ -710,13 +714,13 @@ Click **Route tables → Create**:
 | `Region`                     | `Poland Central`       |
 | `Name`                       | `rt-dev`               |
 | `Propagate gateway routes`   | `No`                   |
- 
+
 Add the tags, click **Review + create**, then **Create**.
  
 **What this does:** Propagate gateway routes is set to No so that routes learned from a VPN or ExpressRoute gateway cannot override the custom 0.0.0.0/0 route to the Firewall. There is no gateway in this lab, but the setting guarantees that all traffic stays under the Firewall’s control. 
 
 Open `rt-dev` → **Routes → Add**:
- 
+
 | Setting                    | Value                           |
 | -------------------------- | ------------------------------- |
 | `Route name`               | `default-to-firewall`           |
@@ -727,20 +731,26 @@ Open `rt-dev` → **Routes → Add**:
  
 Open `rt-dev` → **Subnets → Associate** and select `vnet-dev` / `snet-dev-workload`.
  
-**What this does:** The route `0.0.0.0/0` with the next hop type `Virtual appliance` and the address `10.0.0.4` (the private IP of Azure Firewall) sends all traffic that leaves the subnet to the Firewall. `0.0.0.0/0` means "any destination", so it matches everything that has no more specific route, such as the internet or the other spoke. Azure always chooses the most specific matching route, so traffic inside the same virtual network still stays local, and only the traffic that would otherwise bypass the hub is redirected. Without this route the traffic would go directly to its destination, and the Firewall rules would never be applied. With it, the Firewall becomes the single point where every connection is inspected, allowed or denied.
+**What this does:** Propagate gateway routes is set to No so that routes learned from a VPN or ExpressRoute gateway cannot override the custom `0.0.0.0/0` route to the Firewall. There is no gateway in this lab, but the setting keeps the design safe if one is added later. Every subnet already has automatic system routes: its own virtual network stays local, a peered network goes through the peering, and everything else (`0.0.0.0/0`) goes straight to the internet. Azure follows these routes by itself, and nothing sends the traffic to the Firewall. A Firewall does not intercept traffic on its own, it only inspects what reaches it. This route changes that default.
+
+- `0.0.0.0/0` means "any destination" (zero fixed bits, so every address matches). Azure always picks the most specific matching route, so this route only catches what no other route claims. Traffic to the own VNet (`10.1.0.0/16`) and to the hub (`10.0.0.0/22`) is more specific, so it stays direct. That is why Bastion SSH into the hub does not go through the Firewall.
+- `10.0.0.4` is the private IP of the Firewall: the first usable address of `AzureFirewallSubnet` (`10.0.0.0/26`), because Azure reserves the first four addresses. Check it in **Firewall → Overview → Private IP**, since it may change if the Firewall is recreated.
+- `Virtual appliance` means "send the packet to the machine at this address, and it decides what to do". The other next hop types do not fit: `Internet` is exactly the bypass this route removes, `None` drops the traffic, `Virtual network` is the default local behavior, and `Virtual network gateway` leads to a VPN or ExpressRoute.
+- The system routes of `vnet-dev` contain no route to `10.2.0.0/16`, because dev and prod are not peered. A packet to prod therefore matches only the default `0.0.0.0/0 → Internet`. The custom route has the same prefix and wins over the system one (user-defined routes have priority), so the packet goes to the Firewall instead. The subnet does not tell internal and external addresses apart, it only matches the destination against its route table. The Firewall knows where to send it: the hub is peered with both spokes, so `10.2.0.0/16` is reachable through the peering to `vnet-prod`.
+
+Without this route the packet to prod would follow `0.0.0.0/0 → Internet`. A private `10.2.x.x` address is not routable on the internet, so the packet would be lost and dev to prod would not work at all. Internet access would either not exist or would bypass the Firewall, with no rules, no SNAT through the Firewall public IP and no logs. The Firewall would exist, but no Firewall rule would ever be applied.
 
 ![Route table dev](docs/screenshots/15-route-table-dev.png)
- 
-Create `rt-prod` in the same way, with the same route, and associate it with `vnet-prod` / `snet-prod-web`.
- 
-![Route table prod](docs/screenshots/16-route-table-prod.png)
- 
-**Result:** everything that leaves a spoke goes to the Firewall. Because dev and prod are not peered, the address of the other spoke is unknown, so it also matches `0.0.0.0/0`.
- 
-> A route table that is not associated with a subnet does nothing. Check the **Subnets** tab of each route table.
- 
----
 
+Create `rt-prod` in the same way, with the same route, and associate it with `vnet-prod` / `snet-prod-web`.
+
+![Route table prod](docs/screenshots/16-route-table-prod.png)
+
+**Why both tables:** the reply from prod to dev must also pass through the Firewall. Without `rt-prod` the reply would take the system route, bypass the Firewall and be lost, because the Firewall tracks the state of each connection. This is called asymmetric routing and is a typical cause of timeouts.
+
+**Result:** everything that leaves a spoke towards a network it does not know goes to the Firewall, which becomes the single point where every connection is inspected, allowed or denied.
+
+---
 
 ### Step 12 — Create Azure Bastion
  
@@ -765,6 +775,16 @@ Click **Bastions → Create**:
   
 Add the tags, click **Review + create**, then **Create**.
  
+**What this does:** Azure Bastion is a managed jump service that lets you open an SSH session to a VM from the browser, while the VM stays fully private (no public IP, port 22 closed to the internet).
+
+1. You sign in to the Azure Portal, open the VM and choose **Connect → Bastion** with the private key (`.pem`). The session runs in the browser over HTTPS (port 443) to the Bastion public IP (`vnet-hub-IPv4`).
+2. Bastion checks that your Azure account is allowed to access this VM.
+3. Bastion then opens the SSH connection **from inside the network** to the private IP of the VM on port 22 and relays the session to your browser.
+
+The NSGs allow port 22 only from the Bastion subnet (`10.0.0.64/26`), so nobody else, including the internet and other VMs, can reach SSH. One Bastion in the hub serves both spokes because the hub is peered with both and the **Basic** tier supports peered networks. The SSH traffic goes straight through the peering and does not pass through the Firewall, because the route to the hub is more specific than the `0.0.0.0/0` route to the Firewall.
+
+Without Bastion there would be only two options, both worse: a public IP with port 22 open to the internet (constantly scanned by bots, and inbound traffic would bypass the Firewall), or no remote access at all. Bastion is billed per hour, so delete it after testing.
+
 **Result:** secure access to the VMs through the browser. No SSH port is open to the internet.
  
 ![Azure Bastion](docs/screenshots/17-bastion.png)
@@ -1098,11 +1118,7 @@ When creating a credential, **Organization ID** and **Repository ID** must be fi
  
 ![credential form](docs/screenshots/32-federated-credential-form.png)
 
-*Screenshot: Add credential form with Organization ID and Repository ID filled in and the generated Subject identifier.*
-
 ![credentials list](docs/screenshots/33-federated-credentials-list.png)
-
-*Screenshot: Federated credentials tab with the three credentials.*
  
 #### Error 2. What happens if the IDs are left empty: `AADSTS700213`
  
@@ -1123,8 +1139,6 @@ assertion subject 'repo:Illia-abc@<owner-id>/Hub-and-Spoke-Azure@<repo-id>:pull_
  
 ![aadsts700213](docs/screenshots/34-aadsts700213-error.png)
  
-> `scripts/bootstrap.ps1` must create the credentials in this ID form as well, otherwise every new run of the script ends with the same error. <!-- TODO: confirm the script is updated, then delete this note -->
- 
 ---
  
 ### Step 4. Add the GitHub secrets and the environment
@@ -1141,8 +1155,6 @@ Repository, Settings, Secrets and variables, Actions, New repository secret:
 Then Settings, Environments, New environment, name `lab`.
  
 ![github secrets](docs/screenshots/35-github-secrets.png)
-
-*Screenshot: Actions secrets page with the four secret names (values are never shown).*
  
 #### Error 1. What happens if the secrets are missing: `client-id` and `tenant-id` not supplied
  
@@ -1158,8 +1170,6 @@ Not all values are present. Ensure 'client-id' and 'tenant-id' are supplied.
 **Fix:** add the secrets from the table and re-run the failed job.
  
 ![login-failed](docs/screenshots/36-login-failed-no-secrets.png)
-
-*Screenshot: job `Azure validate + what-if`, step `Login to Azure` failed with "Not all values are present".*
  
 ---
  
@@ -1176,3 +1186,146 @@ git commit -m "docs: add Bicep walkthrough and screenshots"
 git push -u origin docs/readme-bicep
 ```
  
+---
+ 
+### Step 6. Open a Pull Request and check CI
+ 
+1. On GitHub click **Compare & pull request**.
+2. Base `main`, compare `docs/readme-bicep`.
+3. Click **Create pull request**.
+4. Wait for both checks: `Build + lint` and `Azure validate + what-if` (compile, template validation, preview of changes).
+  
+![pr-checks](docs/screenshots/37-pr-checks-green.png)
+ 
+![what-if-summary](docs/screenshots/38-what-if-summary.png)
+ 
+---
+ 
+### Step 7. Merge the Pull Request
+ 
+**Merge pull request**, **Confirm merge**, **Delete branch**. Then update the local copy:
+ 
+```powershell
+git switch main
+git pull
+```
+ 
+---
+ 
+### Step 8. Deploy phase 1: network, compute, monitoring
+ 
+Run locally. For phase 1 only `deployCompute = true` in `main.bicepparam`, the other switches are `false`.
+ 
+```powershell
+az login
+$env:SSH_PUBLIC_KEY = (Get-Content ~/.ssh/id_ed25519.pub)
+ 
+az deployment group what-if -g rg-hubspoke-lab `
+  -f infrastructure/main.bicep -p infrastructure/main.bicepparam
+ 
+az deployment group create -g rg-hubspoke-lab `
+  -f infrastructure/main.bicep -p infrastructure/main.bicepparam
+```
+  
+![deployment](docs/screenshots/39-deployments-phase1.png)
+
+*Screenshot: Resource group, Deployments: `monitoring`, `routing`, `network`, `compute` all Succeeded.*
+ 
+![bicep-tags](docs/screenshots/40-resources-bicep-tags.png)
+
+*Screenshot: resource list with the Tags column showing `deployment = bicep`.*
+ 
+---
+ 
+### Step 9. Deploy phase 2: Azure Firewall and Bastion
+ 
+Set `deployFirewall = true` and `deployBastion = true`, run `what-if`, then `create` (same commands as Step 8). These resources are billed per hour.
+ 
+![bicep-tags](docs/screenshots/41-deployments-phase2.png)
+
+*Screenshot: Deployments list with `firewall` and `bastion` Succeeded.*
+
+![bicep-tags](docs/screenshots/42-effective-routes.png)
+
+*Screenshot: VM network interface, Effective routes: `0.0.0.0/0` with next hop `10.0.0.4` (Firewall private IP).*
+ 
+---
+ 
+### Step 10. Verification tests
+ 
+Run while the Firewall is up.
+ 
+| # | Test | Expected | Result | Evidence |
+| - | ---- | -------- | ------ | -------- |
+| 1 | Dev VM reaches hub | Allowed | TODO | TODO |
+| 2 | Prod VM reaches hub | Allowed | TODO | TODO |
+| 3 | Allowed destination via Firewall | Allowed | TODO | 43 |
+| 4 | Blocked destination via Firewall | Blocked | TODO | 43 |
+| 5 | `apt update` via Firewall | Succeeds | TODO | 43 |
+| 6 | youtube.com | Blocked | TODO | 43 |
+| 7 | dev to prod directly | No connectivity (no peering) | TODO | TODO |
+| 8 | Firewall logs (KQL) | Entries visible | TODO | 44 |
+ 
+Fill the **Result** column only after actually running each test.
+ 
+![test-output](docs/screenshots/43-tests-output.png)
+
+*Screenshot: terminal on the VM with the output of tests .*
+ 
+![firewall-logs](docs/screenshots/44-firewall-logs.png)
+
+*Screenshot: Log Analytics, KQL query result with Firewall allow/deny entries.*
+ 
+---
+ 
+### Step 11. Deploy phase 3: Azure Policy
+ 
+Set `deployPolicy = true`, run `what-if`, then `create`. Policy goes last so a `Deny` effect cannot block the deployment itself.
+ 
+![policy-assignments](docs/screenshots/45-policy-assignments.png)
+
+*Screenshot: Policy, Assignments, Scope column showing `rg-hubspoke-lab`.*
+
+---
+ 
+### Step 12. Clean up the paid resources
+ 
+```powershell
+az network firewall delete -g rg-hubspoke-lab -n afw-hub
+az network bastion delete  -g rg-hubspoke-lab -n bas-hub
+az network public-ip delete -g rg-hubspoke-lab -n pip-afw-hub
+az network public-ip delete -g rg-hubspoke-lab -n pip-afw-mgmt
+az network public-ip delete -g rg-hubspoke-lab -n pip-bas-hub
+az group delete -n rg-hubspoke-lab --yes --no-wait
+az ad app delete --id <appId>
+```
+ 
+Then set `deployFirewall` and `deployBastion` back to `false` in `main.bicepparam`, otherwise the next deployment creates them again. Bicep incremental mode never deletes, so changing the switch alone is not enough.
+ 
+![policy-assignments](docs/screenshots/46-cleanup.png)
+
+*Screenshot: resource list after clean up, without the Firewall, Bastion and public IPs.*
+ 
+---
+  
+### Design decisions in the code
+
+| Decision | Rationale |
+| -------- | --------- |
+| Modules per function, wired in `main.bicep` | Each file has one responsibility and can be reviewed on its own |
+| Route tables are created before the network | Subnets reference them; creating them after the Firewall would be a circular dependency |
+| Firewall private IP is a parameter (`10.0.0.4`) | It is the first usable address of `AzureFirewallSubnet` (Azure reserves the first four). `main.bicep` outputs both the expected and the actual IP so a mismatch is visible |
+| Default route is added only when `deployFirewall = true` | Otherwise traffic would be sent to a Firewall that does not exist |
+| Conditional modules (`if (deployX)`) | Paid resources never appear by accident |
+| Policy is deployed last | A policy with `Deny` effect must not block the deployment itself |
+| Subnets use `defaultOutboundAccess = false` | VMs reach the internet only through the Firewall |
+| Same tags everywhere, `deployment = bicep` | Resources from the Portal and Bicep phases can be told apart in Cost Management |
+
+### Things to know about Bicep
+
+- **Incremental mode never deletes.** Setting `deployFirewall = false` after the Firewall exists does not remove it. Delete the paid resources explicitly (below).
+- **The code is the source of truth.** A manual change in the Portal can be overwritten by the next deployment.
+
+### CI
+
+`.github/workflows/validate.yml` compiles the Bicep code on every pull request and on every push to `main`. A broken template is caught before it is merged.
