@@ -1257,16 +1257,14 @@ Run while the Firewall is up.
  
 | # | Test | Expected | Result | Evidence |
 | - | ---- | -------- | ------ | -------- |
-| 1 | Dev VM reaches hub | Allowed | TODO | TODO |
-| 2 | Prod VM reaches hub | Allowed | TODO | TODO |
-| 3 | Allowed destination via Firewall | Allowed | TODO | 43 |
-| 4 | Blocked destination via Firewall | Blocked | TODO | 43 |
-| 5 | `apt update` via Firewall | Succeeds | TODO | 43 |
-| 6 | youtube.com | Blocked | TODO | 43 |
-| 7 | dev to prod directly | No connectivity (no peering) | TODO | TODO |
-| 8 | Firewall logs (KQL) | Entries visible | TODO | 44 |
- 
-Fill the **Result** column only after actually running each test.
+| 1 | Dev VM traffic reaches the hub Firewall | Allowed | ✅ Passed: requests from `vm-dev-01` (`10.1.1.4`) appear in the Firewall logs, and the default route points to the Firewall (`0.0.0.0/0` → `10.0.0.4`) | 42, 44 |
+| 2 | Prod VM reaches hub | Allowed | ✅ Passed: `apt update` on `vm-prod-01` succeeded during nginx installation (Portal guide, Step 13);
+| 3 | Allowed destination via Firewall | Allowed | ✅ Passed: `curl -I http://azure.archive.ubuntu.com/ubuntu/` returned `HTTP/1.1 200 OK`; log shows `Allow` by rule `ubuntu-updates` | 43, 44 |
+| 4 | Blocked destination via Firewall | Blocked | ✅ Passed: `contracts.canonical.com` (not in any rule) was denied; log shows `Deny` with an empty rule (default deny) | 44 |
+| 5 | `apt update` via Firewall | Succeeds | ✅ Passed: package lists downloaded without errors | 43 |
+| 6 | youtube.com | Blocked | ✅ Passed: `curl` returned `HTTP/1.1 470` (Azure Firewall block response); log shows `Deny` for `youtube.com` | 43, 44 |
+| 7 | dev to prod directly | No direct connectivity (no peering) | ✅ Verified by configuration: only `hub-to-dev` and `hub-to-prod` peerings exist, no dev↔prod peering. Not tested with traffic | 22 |
+| 8 | Firewall logs (KQL) | Entries visible | ✅ Passed: `AZFWApplicationRule` shows `Allow` (`ubuntu-updates`) and `Deny` entries from `10.1.1.4` | 44 |
  
 ![test-output](docs/screenshots/43-tests-output.png)
 
